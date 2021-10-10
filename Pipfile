@@ -1,0 +1,17 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+sharebyurl = {editable = true, path = "."}
+
+[dev-packages]
+pytest = "*"
+flake8 = "*"
+flake8-bugbear = "*"
+mypy = "*"
+isort = "*"
+
+[requires]
+python_version = "3.9"
