@@ -128,10 +128,16 @@ def cli():
     if not destDir.exists():
         destDir.mkdir()
 
-    config.add_section(secretShare)
-    config.set(secretShare, 'expiry', str(expiry))
-    with SBU_CFG.open('w') as f:
-        config.write(f)
+    needToSetExpiry = True
+    if secretShare not in config.sections:
+        config.add_section(secretShare)
+    else:
+        needToSetExpiry = config.getint(secretShare, 'expiry')
+    
+    if needToSetExpiry:
+        config.set(secretShare, 'expiry', str(expiry))
+        with SBU_CFG.open('w') as f:
+            config.write(f)
     
     # TODO: Could add option to walk the shared path and create symlink for each file. This would be more Windows friendly.
     for p in args.paths:
