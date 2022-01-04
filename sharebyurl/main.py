@@ -34,7 +34,6 @@ def generate_token():
 
 class ShareCompleter(object):
     def __init__(self):
-        print("Initializing sharecompleter")
         if SBU_PUBLIC_HTML:
             self.choices = [x.name for x in SBU_PUBLIC_HTML.iterdir() if x.is_dir()]
         else:
@@ -46,7 +45,6 @@ class ShareCompleter(object):
 
 def get_command_parser() -> argparse.ArgumentParser:
 
-    print("At get_command_parser")
     parser = argparse.ArgumentParser(description='Create symlink to arguments in secret path')
     #TODO: add command that removes expired links, perhaps with a mutually exclusive command group to all of the below
     parser.add_argument('-s', '--share', help='Either specify an existing share or specify a tag to which a random string will be appended').completer = ShareCompleter()
@@ -129,7 +127,7 @@ def cli():
         destDir.mkdir()
 
     needToSetExpiry = True
-    if secretShare not in config.sections:
+    if secretShare not in config.sections():
         config.add_section(secretShare)
     else:
         needToSetExpiry = config.getint(secretShare, 'expiry')
