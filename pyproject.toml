@@ -13,10 +13,17 @@ requires-python = ">=3.10"
 authors = [{ name = "Ingolf Becker", email = "ingolf.becker@googlemail.com" }]
 keywords = ["cli", "workflow", "file sharing"]
 classifiers = [
-    "Operating System :: POSIX",
     "Development Status :: 4 - Beta",
     "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Utilities",
 ]
 dependencies = [
     "argcomplete>=3.0",

@@ -1,0 +1,107 @@
+name: Publish
+
+# Publishing to PyPI happens when a GitHub release is published. The
+# workflow_dispatch entry exists so a release candidate can be pushed to
+# TestPyPI first, without creating a release.
+#
+# Authentication is PyPI Trusted Publishing (OIDC) -- there is no API token
+# stored anywhere. This needs a one-off setup before it can upload: a `pypi`
+# and a `testpypi` environment under Settings -> Environments, and a matching
+# trusted publisher registered at https://pypi.org/manage/account/publishing/
+# naming this repository, this workflow file, and that environment. The
+# workflow filename and environment name must match exactly, or the upload
+# fails with `invalid-publisher` after the build has already succeeded.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Index to publish to
+        type: choice
+        options:
+          - testpypi
+          - pypi
+        default: testpypi
+
+# Read-only by default; the publish job opts into id-token below.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test on ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+      - run: uv sync --locked --python ${{ matrix.python-version }}
+      - run: uv run --python ${{ matrix.python-version }} pytest -q
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy sharebyurl
+
+  build:
+    needs: [test, lint]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+
+      # A release tagged v1.0.1 that ships 1.0.0 is a mess to undo, because a
+      # PyPI version can never be reused. Fail before building instead.
+      - name: Check the tag matches __version__
+        if: github.event_name == 'release'
+        run: |
+          version=$(uv run --no-project python -c \
+            "import re,pathlib; print(re.search(r'\"(.+?)\"', pathlib.Path('sharebyurl/__init__.py').read_text()).group(1))")
+          tag="${GITHUB_REF_NAME#v}"
+          echo "tag=$tag  __version__=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match __version__ $version"
+            exit 1
+          fi
+
+      - run: uv build
+      - run: uv run --no-project --with twine twine check dist/*
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ (github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi') && 'testpypi' || 'pypi' }}
+    permissions:
+      # Required for Trusted Publishing. Nothing else in this workflow has it.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ (github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi') && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}

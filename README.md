@@ -147,4 +147,4 @@ Version 0.3 accepted `-e` but silently ignored it; if you relied on that, note t
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/watercrossing/sharebyurl/blob/main/LICENSE).
