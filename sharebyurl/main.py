@@ -88,6 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="replace a link that already exists in the share"
     )
     parser.add_argument(
+        "--copy",
+        action="store_true",
+        help="copy the files instead of linking them (automatic for files other users cannot read)",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="with --prune, report without deleting"
     )
     parser.add_argument(
@@ -209,7 +214,9 @@ def _add(
     dest.mkdir(parents=True, exist_ok=True)
 
     try:
-        result = shares.link_paths(dest, args.paths, use_slug=args.slugify, force=args.force)
+        result = shares.link_paths(
+            dest, args.paths, use_slug=args.slugify, force=args.force, copy=args.copy
+        )
     except ShareError:
         if created_dir and not any(dest.iterdir()):
             dest.rmdir()
@@ -220,10 +227,18 @@ def _add(
     record = store.get(name)
     if args.expiry or not (existed and record):
         store.record(name, expires, now=now)
+    linked = [n for n in result.created if n not in result.copied]
+    store.note_entries(name, result.copied, linked)
     store.save()
 
     for skipped in result.already_present:
         print(f"Already shared, left alone: {skipped}", file=sys.stderr)
+    for copied in result.copied:
+        reason = "as asked" if args.copy else "because the webserver could not follow a link to it"
+        print(
+            f"Copied {copied} {reason}; share it again with --force after it changes.",
+            file=sys.stderr,
+        )
 
     _print_share_urls(public_url, name, result.created, dest)
 
@@ -281,7 +296,8 @@ def _remove(public_html: Path, store: ShareStore, names: list[str]) -> int:
     failures = 0
     for name in names:
         try:
-            shares.delete_share(public_html, name)
+            record = store.get(name)
+            shares.delete_share(public_html, name, record.copies if record else ())
         except ShareError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             failures += 1

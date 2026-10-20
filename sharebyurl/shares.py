@@ -1,16 +1,21 @@
 """Creating, listing, removing and pruning shares on disk.
 
 A share is a directory directly under ``public_html`` whose name is
-unguessable, containing one symlink per shared file. Nothing in here writes
-state; the caller owns the :class:`~sharebyurl.store.ShareStore`.
+unguessable, containing one symlink per shared file -- or a copy, for a file the
+webserver could not reach through a symlink. Nothing in here writes state; the
+caller owns the :class:`~sharebyurl.store.ShareStore`.
 """
 
 from __future__ import annotations
 
+import filecmp
 import os
 import re
 import secrets
+import shutil
+import stat
 import string
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -89,12 +94,35 @@ def link_name_for(path: Path, use_slug: bool) -> str:
     return path.name
 
 
+#: A copy has to be readable by the webserver, whatever the original's mode.
+COPY_MODE = 0o644
+
+
+def readable_by_others(path: Path) -> bool:
+    """Whether a user other than the owner can follow a link to ``path``.
+
+    The webserver runs as some other user, typically not in the owner's group,
+    so what it can reach is what the "other" bits allow: read on the target,
+    and search on every directory above it. A home directory of mode 750 is
+    the common case that fails this, and the symptom is a 403.
+    """
+    path = path.resolve()
+    needed = stat.S_IROTH | (stat.S_IXOTH if path.is_dir() else 0)
+    if path.stat().st_mode & needed != needed:
+        return False
+    return all(parent.stat().st_mode & stat.S_IXOTH for parent in path.parents)
+
+
 @dataclass
 class LinkResult:
-    """What :func:`link_paths` did, so the caller can report it."""
+    """What :func:`link_paths` did, so the caller can report it.
+
+    ``copied`` names the subset of ``created`` that are copies, not symlinks.
+    """
 
     created: list[str]
     already_present: list[str]
+    copied: list[str]
 
 
 def resolve_sources(paths: list[Path]) -> list[Path]:
@@ -111,14 +139,31 @@ def resolve_sources(paths: list[Path]) -> list[Path]:
 
 
 def link_paths(
-    dest_dir: Path, paths: list[Path], use_slug: bool = False, force: bool = False
+    dest_dir: Path,
+    paths: list[Path],
+    use_slug: bool = False,
+    force: bool = False,
+    copy: bool = False,
 ) -> LinkResult:
     """Symlink each of ``paths`` into ``dest_dir``.
+
+    A file the webserver could not read through a symlink is copied instead,
+    as is every file when ``copy`` is set. A copy is a snapshot: sharing the
+    file again after it changed needs ``force``, like any other name clash.
 
     Every path is checked before anything is written, so a typo in the last
     argument does not leave a half-populated share.
     """
     resolved = resolve_sources(paths)
+
+    to_copy = {source for source in resolved if copy or not readable_by_others(source)}
+    unreachable_dirs = [source for source in to_copy if source.is_dir()]
+    if unreachable_dirs:
+        listing = ", ".join(str(p) for p in unreachable_dirs)
+        raise ShareError(
+            f"Only files can be copied, and these directories cannot be reached by "
+            f"other users through a symlink: {listing}"
+        )
 
     names: dict[str, Path] = {}
     for source in resolved:
@@ -131,23 +176,50 @@ def link_paths(
 
     created: list[str] = []
     already: list[str] = []
+    copied: list[str] = []
     for name, source in names.items():
         link = dest_dir / name
+        copying = source in to_copy
         if link.is_symlink() or link.exists():
             current = os.readlink(link) if link.is_symlink() else None
-            if current == str(source):
+            if current == str(source) and not copying:
                 already.append(name)
                 continue
-            if not force:
+            if current is None and copying and filecmp.cmp(link, source, shallow=False):
+                already.append(name)
+                continue
+            # A link to this very file that has to become a copy is the same
+            # share of the same file, so it needs no --force.
+            if current != str(source) and not force:
                 raise ShareError(
-                    f"{name!r} is already in this share and points somewhere else "
-                    f"({current or 'a real file'}). Re-run with --force to replace it."
+                    f"{name!r} is already in this share and is something else "
+                    f"({current or 'a copy or real file'}). Re-run with --force to replace it."
                 )
             link.unlink()
-        link.symlink_to(source)
+        if copying:
+            _copy_readable(source, link)
+            copied.append(name)
+        else:
+            link.symlink_to(source)
         created.append(name)
 
-    return LinkResult(created=created, already_present=already)
+    return LinkResult(created=created, already_present=already, copied=copied)
+
+
+def _copy_readable(source: Path, dest: Path) -> None:
+    """Copy ``source`` to ``dest`` with a mode the webserver can read.
+
+    Written under a temporary name and renamed into place, so a reader never
+    sees half a file.
+    """
+    tmp = dest.with_name(f".{dest.name}.tmp")
+    try:
+        shutil.copyfile(source, tmp)
+        tmp.chmod(COPY_MODE)
+        tmp.replace(dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def share_url(public_url: str, share: str, filename: str | None = None) -> str:
@@ -185,11 +257,12 @@ def list_shares(public_html: Path, store: ShareStore) -> list[ShareRow]:
     return rows
 
 
-def delete_share(public_html: Path, name: str) -> None:
+def delete_share(public_html: Path, name: str, copies: Iterable[str] = ()) -> None:
     """Remove a share directory and the symlinks in it.
 
     Refuses anything that is not a direct child of ``public_html`` or that
-    holds real files, on the grounds that this is the one operation here that
+    holds real files other than ``copies`` -- the ones this tool made, and
+    recorded -- on the grounds that this is the one operation here that
     destroys data.
     """
     validate_share_name(name)
@@ -201,7 +274,8 @@ def delete_share(public_html: Path, name: str) -> None:
         raise ShareError(f"Refusing to delete {target}: it is not directly under {public_html}.")
 
     entries = list(target.iterdir())
-    real_files = [e.name for e in entries if not e.is_symlink()]
+    ours = set(copies)
+    real_files = [e.name for e in entries if not e.is_symlink() and e.name not in ours]
     if real_files:
         raise ShareError(
             f"Refusing to delete share {name!r}: it contains real files, not just "
@@ -237,7 +311,7 @@ def prune(
             removed.append(share.name)
             continue
         try:
-            delete_share(public_html, share.name)
+            delete_share(public_html, share.name, share.copies)
         except ShareError as exc:
             skipped.append((share.name, str(exc)))
             continue

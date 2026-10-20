@@ -111,6 +111,31 @@ class TestSharing:
         assert not (configured.src / "a.txt").is_symlink()
 
 
+class TestCopying:
+    def test_copy_is_recorded_and_removable(self, configured, capsys):
+        source = configured.file("talk.pdf")
+        assert cli(["--copy", str(source)]) == 0
+        assert "Copied talk.pdf as asked" in capsys.readouterr().err
+
+        share = configured.only_share()
+        state = json.loads(configured.state_file.read_text())
+        assert state["shares"][share.name]["copies"] == ["talk.pdf"]
+
+        assert cli(["--remove", share.name]) == 0
+        assert not share.exists()
+        assert source.exists()
+
+    def test_relinking_a_copy_drops_it_from_the_record(self, configured, capsys):
+        source = configured.file("talk.pdf")
+        cli(["--copy", str(source)])
+        share = configured.only_share()
+        cli(["-s", share.name, "--force", str(configured.file("talk.pdf", "v2"))])
+
+        state = json.loads(configured.state_file.read_text())
+        assert "copies" not in state["shares"][share.name]
+        assert (share / "talk.pdf").is_symlink()
+
+
 class TestExpiry:
     def test_expiry_is_recorded(self, configured, capsys):
         assert cli(["-e", "7d", str(configured.file("a.txt"))]) == 0

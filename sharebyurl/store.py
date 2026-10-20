@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,20 +25,28 @@ def default_store_path() -> Path:
 
 @dataclass
 class Share:
-    """One tracked share. ``expires`` of ``None`` means it never expires."""
+    """One tracked share. ``expires`` of ``None`` means it never expires.
+
+    ``copies`` names the entries that are copies rather than symlinks, which is
+    what lets prune delete them: a real file nobody recorded is left alone.
+    """
 
     name: str
     created: datetime
     expires: datetime | None = None
+    copies: list[str] = field(default_factory=list)
 
     def is_expired(self, now: datetime) -> bool:
         return self.expires is not None and self.expires <= now
 
-    def to_json(self) -> dict[str, str | None]:
-        return {
+    def to_json(self) -> dict[str, str | list[str] | None]:
+        data: dict[str, str | list[str] | None] = {
             "created": self.created.isoformat(),
             "expires": self.expires.isoformat() if self.expires else None,
         }
+        if self.copies:
+            data["copies"] = sorted(self.copies)
+        return data
 
     @classmethod
     def from_json(cls, name: str, data: dict) -> Share:
@@ -46,6 +54,7 @@ class Share:
             name=name,
             created=_parse_time(data.get("created")) or _now(),
             expires=_parse_time(data.get("expires")),
+            copies=list(data.get("copies") or []),
         )
 
 
@@ -96,9 +105,22 @@ class ShareStore:
         """Create or update a share's record, preserving its original creation time."""
         now = now or _now()
         existing = self.shares.get(name)
-        share = Share(name=name, created=existing.created if existing else now, expires=expires)
+        share = Share(
+            name=name,
+            created=existing.created if existing else now,
+            expires=expires,
+            copies=existing.copies if existing else [],
+        )
         self.shares[name] = share
         return share
+
+    def note_entries(self, name: str, copied: list[str], linked: list[str]) -> None:
+        """Track which entries of a recorded share are copies.
+
+        ``linked`` matters too: --force can replace a copy with a symlink.
+        """
+        share = self.shares[name]
+        share.copies = sorted((set(share.copies) - set(linked)) | set(copied))
 
     def forget(self, name: str) -> None:
         self.shares.pop(name, None)

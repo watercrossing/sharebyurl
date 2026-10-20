@@ -7,7 +7,7 @@ $ sharebyurl holiday.jpg
 https://example.com/s/debkxsyfz2/holiday.jpg
 ```
 
-`sharebyurl` creates a directory named with a random token under your public web root and symlinks the file into it. Nothing is copied, so sharing a 4 GB video costs nothing but an inode.
+`sharebyurl` creates a directory named with a random token under your public web root and symlinks the file into it. Nothing is copied, so sharing a 4 GB video costs nothing but an inode — unless the webserver could not follow the link, in which case the file is copied instead (see [Copies](#copies)).
 
 ## How it works
 
@@ -55,6 +55,7 @@ Settings live in `~/.config/sharebyurl.ini` (or `$XDG_CONFIG_HOME`, or `$SHAREBY
 | `sharebyurl -s london21-9me2gkistk b.jpg` | add to that existing share |
 | `sharebyurl --slugify "My Photo.JPG"` | link it as `my-photo.jpg` instead |
 | `sharebyurl -e 7d a.jpg` | expire the share in a week |
+| `sharebyurl --copy a.pdf` | copy the file into the share instead of linking it |
 | `sharebyurl --list` | every share, with expiry |
 | `sharebyurl --remove <share>` | delete a share (the originals are untouched) |
 | `sharebyurl --prune` | delete every share whose expiry has passed |
@@ -63,6 +64,22 @@ Settings live in `~/.config/sharebyurl.ini` (or `$XDG_CONFIG_HOME`, or `$SHAREBY
 Sharing one file prints the URL to that file; sharing several prints the URL to the directory.
 
 Re-sharing a file that is already in a share is a no-op rather than an error. If the name is taken by a *different* file, `sharebyurl` says so and stops — `--force` replaces it.
+
+### Copies
+
+A symlink only works if the webserver's user can read the file *and* search every directory above it. A file under a home directory of mode `750` fails that, and the link would give a 403. So before linking, `sharebyurl` checks the "other" permission bits along the path, and copies any file that fails, saying so on stderr. The copy is made mode `644`, whatever the original's mode.
+
+`--copy` copies regardless, which is how to share a snapshot of a file you are still editing.
+
+A copy does not follow the original. Sharing the same file again is a no-op while the contents match; once the original has changed, it needs `--force`, which replaces the copy:
+
+```console
+$ sharebyurl -s talk-9me2gkistk --force talk.pdf
+```
+
+Copies are recorded in the state file, so `--remove` and `--prune` delete them like links. A real file they have no record of is still left alone. Directories are never copied: an unreachable directory is an error.
+
+The check only looks at permission bits, so a webserver given access by an ACL or a shared group gets copies it did not need. That costs disk space, not correctness.
 
 ### Expiry
 
@@ -109,7 +126,7 @@ Verify it before relying on it: `/s/` should give 403, and `/s/<token>/` a listi
 Two things worth knowing:
 
 - Apache's `FollowSymLinks` is what makes any of this work. `SymLinksIfOwnerMatch` will not do, since the target is owned by you and served by `www-data`.
-- The webserver user must be able to read both the target file *and* every directory on the path to it. A file mode `600` in `~/Documents` gives a 403, not a download.
+- The webserver user must be able to read both the target file *and* every directory on the path to it. `sharebyurl` copies a file that fails this rather than link it (see [Copies](#copies)).
 
 ## Shell completion
 

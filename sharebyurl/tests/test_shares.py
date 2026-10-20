@@ -189,3 +189,110 @@ class TestPrune:
         assert removed == []
         assert skipped == [("gone", "already gone, record dropped")]
         assert store.get("gone") is None
+
+
+class TestCopying:
+    """Files the webserver cannot reach through a symlink are copied instead."""
+
+    @pytest.fixture
+    def unreachable(self, monkeypatch):
+        monkeypatch.setattr(shares, "readable_by_others", lambda path: False)
+
+    def test_private_file_is_not_readable_by_others(self, tmp_path):
+        private = tmp_path / "private.pdf"
+        private.write_text("x")
+        private.chmod(0o600)
+        assert not shares.readable_by_others(private)
+
+    def test_world_readable_file_in_a_closed_directory_is_not_either(self, tmp_path):
+        closed = tmp_path / "home"
+        closed.mkdir()
+        public = closed / "talk.pdf"
+        public.write_text("x")
+        public.chmod(0o644)
+        closed.chmod(0o750)
+        assert not shares.readable_by_others(public)
+
+    def test_unreachable_file_is_copied_world_readable(self, sandbox, unreachable):
+        source = sandbox.file("talk.pdf", "v1")
+        source.chmod(0o600)
+        dest = sandbox.www / "share"
+        dest.mkdir()
+
+        result = shares.link_paths(dest, [source])
+
+        copy = dest / "talk.pdf"
+        assert result.copied == ["talk.pdf"]
+        assert not copy.is_symlink()
+        assert copy.read_text() == "v1"
+        assert copy.stat().st_mode & 0o777 == shares.COPY_MODE
+
+    def test_copy_flag_copies_even_a_reachable_file(self, sandbox):
+        dest = sandbox.www / "share"
+        dest.mkdir()
+        result = shares.link_paths(dest, [sandbox.file("a.txt")], copy=True)
+        assert result.copied == ["a.txt"]
+        assert not (dest / "a.txt").is_symlink()
+
+    def test_recopying_an_unchanged_file_is_idempotent(self, sandbox, unreachable):
+        source = sandbox.file("talk.pdf", "v1")
+        dest = sandbox.www / "share"
+        dest.mkdir()
+        shares.link_paths(dest, [source])
+        result = shares.link_paths(dest, [source])
+        assert result.created == []
+        assert result.already_present == ["talk.pdf"]
+
+    def test_changed_file_needs_force_and_then_updates(self, sandbox, unreachable):
+        source = sandbox.file("talk.pdf", "v1")
+        dest = sandbox.www / "share"
+        dest.mkdir()
+        shares.link_paths(dest, [source])
+        source.write_text("v2")
+
+        with pytest.raises(ShareError, match="--force"):
+            shares.link_paths(dest, [source])
+        shares.link_paths(dest, [source], force=True)
+        assert (dest / "talk.pdf").read_text() == "v2"
+
+    def test_a_link_to_the_same_file_becomes_a_copy_without_force(self, sandbox, monkeypatch):
+        source = sandbox.file("talk.pdf")
+        dest = sandbox.www / "share"
+        dest.mkdir()
+        shares.link_paths(dest, [source])
+
+        monkeypatch.setattr(shares, "readable_by_others", lambda path: False)
+        result = shares.link_paths(dest, [source])
+        assert result.copied == ["talk.pdf"]
+        assert not (dest / "talk.pdf").is_symlink()
+
+    def test_unreachable_directory_is_an_error_not_a_copy(self, sandbox, unreachable):
+        folder = sandbox.src / "slides"
+        folder.mkdir()
+        dest = sandbox.www / "share"
+        dest.mkdir()
+        with pytest.raises(ShareError, match="Only files can be copied"):
+            shares.link_paths(dest, [folder])
+        assert list(dest.iterdir()) == []
+
+    def test_recorded_copies_can_be_deleted(self, sandbox, unreachable):
+        source = sandbox.file("talk.pdf")
+        dest = sandbox.www / "share"
+        dest.mkdir()
+        shares.link_paths(dest, [source])
+
+        shares.delete_share(sandbox.www, "share", copies=["talk.pdf"])
+        assert not dest.exists()
+        assert source.exists()
+
+    def test_prune_deletes_a_share_holding_its_own_copies(self, sandbox, unreachable):
+        store = store_at(sandbox)
+        dest = sandbox.www / "dead"
+        dest.mkdir()
+        result = shares.link_paths(dest, [sandbox.file("talk.pdf")])
+        store.record("dead", NOW - timedelta(days=1), now=NOW)
+        store.note_entries("dead", result.copied, [])
+
+        removed, skipped = shares.prune(sandbox.www, store, NOW)
+        assert removed == ["dead"] and skipped == []
+        assert not dest.exists()

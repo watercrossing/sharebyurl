@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from sharebyurl import shares
+
 
 @dataclass
 class Sandbox:
@@ -57,6 +59,10 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(box.config))
     monkeypatch.setenv("XDG_STATE_HOME", str(box.state))
     monkeypatch.delenv("SHAREBYURL_CONFIG", raising=False)
+    # pytest's tmp_path sits under a mode-700 directory, so every source would
+    # look unreachable to the webserver and be copied. Tests of the copying
+    # path set this back to something else themselves.
+    monkeypatch.setattr(shares, "readable_by_others", lambda path: True)
     return box
 
 
